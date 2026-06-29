@@ -2,7 +2,6 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import ChatMessage from './ChatMessage.vue'
-import ChartPerformance from './ChartPerformance.vue'
 
 const props = defineProps({
   title: { type: String, default: 'AI 对话窗口' },
@@ -45,7 +44,6 @@ watch(
 
     <div ref="messagesEl" class="messages">
       <ChatMessage v-for="message in messages" :key="message.id" :message="message" />
-      <ChartPerformance v-if="title.includes('数据可视化')" />
     </div>
 
     <div class="composer-shell">
