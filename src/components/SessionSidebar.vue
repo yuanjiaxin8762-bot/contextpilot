@@ -1,4 +1,5 @@
 <script setup>
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import AppIcon from './AppIcon.vue'
 
 defineProps({
@@ -7,7 +8,38 @@ defineProps({
   collapsed: { type: Boolean, default: false },
 })
 
-defineEmits(['select', 'collapse', 'expand'])
+const emit = defineEmits(['select', 'create', 'share', 'rename', 'delete', 'collapse', 'expand'])
+const openMenuId = ref('')
+
+function toggleMenu(id) {
+  openMenuId.value = openMenuId.value === id ? '' : id
+}
+
+function closeMenu() {
+  openMenuId.value = ''
+}
+
+function selectSession(id) {
+  closeMenu()
+  emit('select', id)
+}
+
+function runAction(type, id) {
+  closeMenu()
+  emit(type, id)
+}
+
+function handleDocumentClick() {
+  closeMenu()
+}
+
+onMounted(() => {
+  document.addEventListener('click', handleDocumentClick)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', handleDocumentClick)
+})
 </script>
 
 <template>
@@ -20,17 +52,13 @@ defineEmits(['select', 'collapse', 'expand'])
       aria-label="展开会话栏"
       @click="$emit('expand')"
     >
-      <span class="brand-mark mini">CP</span>
+      <span class="rail-content-icon"><AppIcon name="user" :size="18" /></span>
       <AppIcon name="chevrons-right" :size="18" />
     </button>
 
     <template v-else>
       <div class="sidebar-header">
-        <div class="brand-mark">CP</div>
-        <div class="sidebar-title">
-          <p class="eyebrow">CONTEXTPILOT</p>
-          <h1>上下文操作台</h1>
-        </div>
+        <h1 class="brand-word">contexpilot</h1>
         <button
           type="button"
           class="icon-btn"
@@ -42,9 +70,9 @@ defineEmits(['select', 'collapse', 'expand'])
       </div>
 
       <nav class="quick-actions" aria-label="快捷操作">
-        <button type="button" class="primary-action">
+        <button type="button" class="primary-action" @click="$emit('create')">
           <AppIcon name="plus" :size="16" />
-          <span>新建会话</span>
+          <span>新建对话</span>
         </button>
       </nav>
 
@@ -53,17 +81,50 @@ defineEmits(['select', 'collapse', 'expand'])
           <span>会话</span>
           <strong>{{ sessions.length }}</strong>
         </div>
-        <button
+        <div
           v-for="session in sessions"
           :key="session.id"
-          type="button"
           class="session-item"
           :class="{ active: session.id === activeId }"
-          @click="$emit('select', session.id)"
+          @click.stop
         >
-          <strong>{{ session.title }}</strong>
-          <em>{{ session.time }}</em>
-        </button>
+          <button type="button" class="session-main" @click="selectSession(session.id)">
+            <strong>{{ session.title }}</strong>
+            <em>{{ session.time }}</em>
+          </button>
+
+          <div class="session-actions">
+            <button
+              type="button"
+              class="session-menu-trigger"
+              :aria-label="`${session.title} 操作`"
+              :aria-expanded="openMenuId === session.id"
+              @click.stop="toggleMenu(session.id)"
+            >
+              <AppIcon name="more-horizontal" :size="18" />
+            </button>
+
+            <div v-if="openMenuId === session.id" class="session-menu" role="menu">
+              <button type="button" role="menuitem" @click.stop="runAction('share', session.id)">
+                <AppIcon name="share" :size="17" />
+                <span>分享</span>
+              </button>
+              <button type="button" role="menuitem" @click.stop="runAction('rename', session.id)">
+                <AppIcon name="pencil" :size="17" />
+                <span>重命名</span>
+              </button>
+              <button
+                type="button"
+                class="danger"
+                role="menuitem"
+                @click.stop="runAction('delete', session.id)"
+              >
+                <AppIcon name="trash" :size="17" />
+                <span>删除</span>
+              </button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <button type="button" class="all-sessions">

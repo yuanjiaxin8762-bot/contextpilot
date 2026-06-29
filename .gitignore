@@ -89,3 +89,4 @@ coverage
 temp/
 tmp/
 /src/model/
+/%SystemDrive%/

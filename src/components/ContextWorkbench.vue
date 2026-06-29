@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import AppIcon from './AppIcon.vue'
 import ContextCard from './ContextCard.vue'
 
@@ -8,7 +8,7 @@ const props = defineProps({
   collapsed: { type: Boolean, default: false },
 })
 
-defineEmits(['collapse', 'expand'])
+defineEmits(['collapse', 'expand', 'update-priority'])
 
 // 上下文片段选择状态（默认取数据里的 selected）
 const selectedIds = ref(new Set(props.cards.filter((c) => c.selected).map((c) => c.id)))
@@ -44,6 +44,19 @@ const filteredCards = computed(() =>
   activeFilter.value === '全部'
     ? props.cards
     : props.cards.filter((c) => c.category === activeFilter.value),
+)
+
+watch(
+  () => props.cards.map((card) => `${card.id}:${card.selected}`).join('|'),
+  () => {
+    selectedIds.value = new Set(props.cards.filter((c) => c.selected).map((c) => c.id))
+    if (
+      activeFilter.value !== '全部' &&
+      !props.cards.some((c) => c.category === activeFilter.value)
+    ) {
+      activeFilter.value = '全部'
+    }
+  },
 )
 
 function selectFilter(label) {
@@ -129,9 +142,8 @@ const metrics = computed(() => {
       aria-label="展开上下文栏"
       @click="$emit('expand')"
     >
-      <AppIcon name="layers" :size="18" />
-      <span class="rail-label">上下文</span>
-      <AppIcon name="chevrons-left" :size="18" />
+      <span class="rail-content-icon"><AppIcon name="layers" :size="18" /></span>
+      <AppIcon name="chevrons-right" :size="18" />
     </button>
 
     <template v-else>
@@ -145,7 +157,7 @@ const metrics = computed(() => {
           aria-label="收起上下文栏"
           @click="$emit('collapse')"
         >
-          <AppIcon name="chevrons-right" :size="16" />
+          <AppIcon name="chevrons-left" :size="16" />
         </button>
       </header>
 
@@ -202,14 +214,20 @@ const metrics = computed(() => {
       </div>
     </div>
 
-    <div class="context-list">
+    <div v-if="filteredCards.length" class="context-list">
       <ContextCard
         v-for="card in filteredCards"
         :key="card.id"
         :card="card"
         :selected="selectedIds.has(card.id)"
         @toggle="toggleCard(card.id)"
+        @update-priority="$emit('update-priority', $event)"
       />
+    </div>
+    <div v-else class="context-empty" aria-live="polite">
+      <span class="empty-icon"><AppIcon name="layers" :size="22" /></span>
+      <h3>暂无上下文数据</h3>
+      <p>发送第一条消息后，这里会加载本轮对话的关键片段。</p>
     </div>
     </template>
   </section>
