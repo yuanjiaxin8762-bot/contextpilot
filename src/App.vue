@@ -4,7 +4,7 @@ import SessionSidebar from './components/SessionSidebar.vue'
 import ContextWorkbench from './components/ContextWorkbench.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import { sessions, totalSessions, contextCards } from './data/workspace.js'
-import { chatModelLabel, sendChatMessage, sendChatMessageStream, chatStreams, isAbortError, loadHistory } from './model/chatAdapter.js'
+import { chatModelLabel, sendChatMessage, sendChatMessageStream, chatStreams, isAbortError, loadHistory, deleteRemoteSession } from './model/chatAdapter.js'
 
 const baseContextCards = ref(contextCards.map((card) => ({ ...card })))
 const defaultContextCategories = [...new Set(contextCards.map((card) => card.category))]
@@ -114,12 +114,15 @@ function renameSession(id) {
   }
 }
 
-function deleteSession(id) {
+async function deleteSession(id) {
   const index = chatSessions.value.findIndex((item) => item.id === id)
   if (index < 0) return
 
   const session = chatSessions.value[index]
   if (!window.confirm(`删除对话“${session.title}”？`)) return
+
+  // 后端删除（opencode.db）；失败不阻断前端删除，只提示。
+  const ok = await deleteRemoteSession(id)
 
   chatSessions.value.splice(index, 1)
   if (chatSessions.value.length === 0) {
@@ -130,7 +133,7 @@ function deleteSession(id) {
     const next = chatSessions.value[Math.min(index, chatSessions.value.length - 1)]
     activeSessionId.value = next.id
   }
-  chatError.value = ''
+  chatError.value = ok ? '' : '后端会话删除失败，刷新后该会话可能仍在。'
 }
 
 function addContextFromMessage({ category, message }) {

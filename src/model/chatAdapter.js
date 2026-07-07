@@ -191,6 +191,21 @@ export async function loadHistory() {
   }
 }
 
+// 删除后端会话（opencode.db）。成功返回 true 并清本地 session 缓存；失败返回 false（不抛）。
+export async function deleteRemoteSession(sessionId, signal) {
+  if (backend !== 'opencode') return false
+  const directory = env.VITE_OPENCODE_DIRECTORY || OPENCODE_DEFAULT_DIRECTORY
+  const client = getBridgeClient()
+  try {
+    await client.removeSession({ sessionID: sessionId, directory }, signal)
+    opencodeSessions.delete(sessionId)
+    return true
+  } catch (error) {
+    console.warn('[chatAdapter] deleteRemoteSession 失败：', error?.message || error)
+    return false
+  }
+}
+
 // opencode WithParts → UI message：text/reasoning 分别从 parts 提取拼接。
 function toUIMessage(withParts) {
   if (!withParts || typeof withParts !== 'object') return null

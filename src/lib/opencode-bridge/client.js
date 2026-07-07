@@ -193,6 +193,13 @@ export class OpenCodeBridgeClient {
     })
   }
 
+  removeSession(input, signal) {
+    return this.request('DELETE', `/session/${encodeURIComponent(input.sessionID)}`, {
+      query: this.workspaceQuery(input),
+      signal,
+    })
+  }
+
   createSession(input = {}, signal) {
     const { directory, workspace, ...body } = input
     return this.request('POST', '/session', {
