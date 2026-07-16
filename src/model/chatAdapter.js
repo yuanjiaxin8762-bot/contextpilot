@@ -6,7 +6,7 @@ const OPENCODE_DEFAULT_MODEL_ID = 'deepseek-v4-flash-free'
 const OPENCODE_DEFAULT_DIRECTORY = 'C:\\Users\\LYin\\Projects\\contextpilot'
 const OPENAI_COMPATIBLE_DEFAULT_PATH = '/chat/completions'
 const OPENCODE_CHAT_SYSTEM_PROMPT =
-  '你是 ContextPilot 聊天区的普通对话助手。禁止调用工具、禁止读取或修改文件、禁止创建子任务。只用文本直接回答用户问题。'
+  '你是 ContextPilot 聊天区的普通对话助手。请遵循当前会话的对话底盘配置，直接、清晰、可执行地回答用户问题。'
 const SUPERVISOR_SYSTEM_PROMPT =
   '你是 ContextPilot 的上下文监督助手。你的职责是把主对话按主题总结成结构化上下文卡片，供用户在工作台勾选后注入后续对话。严格按用户指令的 JSON 数组格式输出，不要输出任何解释或多余文字。'
 const OPENCODE_CHAT_DISABLED_TOOLS = [
@@ -27,6 +27,27 @@ const OPENCODE_CHAT_DISABLED_TOOLS = [
   'external_directory',
 ]
 
+const CHAT_CONFIG_DEFAULTS = {
+  goal: '',
+  stage: '需求澄清',
+  rules: ['优先给出可执行结论', '涉及不确定性时说明假设', '改动建议附带验证方式'],
+  toolPermissions: {
+    readFiles: 'allow',
+    runTests: 'allow',
+    writeFiles: 'confirm',
+    network: 'deny',
+  },
+  acceptanceCriteria: '',
+  projectMemory: '',
+}
+
+const CHAT_CONFIG_TOOL_LABELS = {
+  readFiles: '读取文件',
+  runTests: '运行测试',
+  writeFiles: '写入文件',
+  network: '联网',
+}
+
 const env = import.meta.env
 const backend = (env.VITE_CHAT_BACKEND || 'opencode').toLowerCase()
 const opencodeSessions = new Map()
@@ -37,10 +58,45 @@ function normalizeMetadata(metadata) {
   return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}
 }
 
+export function createDefaultChatConfig() {
+  return {
+    ...CHAT_CONFIG_DEFAULTS,
+    rules: [...CHAT_CONFIG_DEFAULTS.rules],
+    toolPermissions: { ...CHAT_CONFIG_DEFAULTS.toolPermissions },
+  }
+}
+
+export function normalizeChatConfig(config) {
+  const input = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
+  const toolPermissions = input.toolPermissions && typeof input.toolPermissions === 'object'
+    ? input.toolPermissions
+    : {}
+  const normalizeText = (value, maxLength) => String(value || '').trim().slice(0, maxLength)
+  const normalizePermission = (value, fallback) =>
+    ['allow', 'confirm', 'deny'].includes(value) ? value : fallback
+
+  return {
+    goal: normalizeText(input.goal, 300),
+    stage: normalizeText(input.stage, 80) || CHAT_CONFIG_DEFAULTS.stage,
+    rules: [...new Set((Array.isArray(input.rules) ? input.rules : CHAT_CONFIG_DEFAULTS.rules)
+      .map((rule) => normalizeText(rule, 80))
+      .filter(Boolean))].slice(0, 12),
+    toolPermissions: {
+      readFiles: normalizePermission(toolPermissions.readFiles, CHAT_CONFIG_DEFAULTS.toolPermissions.readFiles),
+      runTests: normalizePermission(toolPermissions.runTests, CHAT_CONFIG_DEFAULTS.toolPermissions.runTests),
+      writeFiles: normalizePermission(toolPermissions.writeFiles, CHAT_CONFIG_DEFAULTS.toolPermissions.writeFiles),
+      network: normalizePermission(toolPermissions.network, CHAT_CONFIG_DEFAULTS.toolPermissions.network),
+    },
+    acceptanceCriteria: normalizeText(input.acceptanceCriteria, 500),
+    projectMemory: normalizeText(input.projectMemory, 500),
+  }
+}
+
 function buildMainMetadata(baseMetadata, supervisorSessionId, cards) {
   const metadata = { ...normalizeMetadata(baseMetadata), type: 'main' }
   if (supervisorSessionId) metadata.supervisorSessionId = supervisorSessionId
   if (cards !== undefined) metadata.contextCards = cards || []
+  if (metadata.chatConfig !== undefined) metadata.chatConfig = normalizeChatConfig(metadata.chatConfig)
   return metadata
 }
 
@@ -91,10 +147,10 @@ function getBridgeClient() {
 
 // 流式版发送：复用同步路径的 session 缓存、首轮上下文注入、禁工具 guard、provider/model 配置。
 // onDelta(delta, fullText) 由底层 runPrompt 在每个文本增量时回调；fullText 是已拼接的完整文本。
-export async function sendChatMessageStream({ sessionId, title, messages, signal, onDelta, onReasoning, selectedCards }) {
+export async function sendChatMessageStream({ sessionId, title, messages, signal, onDelta, onReasoning, selectedCards, chatConfig }) {
   if (backend === 'openai-compatible') {
     // 该后端 v1 不支持流式：走同步接口，再整体回调一次。
-    const text = await sendOpenAICompatibleMessage({ messages, signal })
+    const text = await sendOpenAICompatibleMessage({ messages, signal, chatConfig })
     if (onDelta) onDelta(text, text)
     return { text, sessionID: null }
   }
@@ -105,12 +161,12 @@ export async function sendChatMessageStream({ sessionId, title, messages, signal
   }
 
   // 复用同步路径的 session 缓存（按 client session id 映射到 opencode session id）。
-  const session = await ensureOpencodeSession(sessionId, title, signal)
+  const session = await ensureOpencodeSession(sessionId, title, signal, chatConfig)
   // 选中卡片作为上下文前置注入（补上工作台勾选 → 主对话的链路）。
   const basePrompt = session.isNew ? buildSeededPrompt(messages, latestUserMessage.text) : latestUserMessage.text
   const cardContext = selectedCards?.length ? buildContextFromCards(selectedCards) : ''
   const promptText = cardContext ? `${cardContext}\n\n${basePrompt}` : basePrompt
-  const guard = opencodeChatPromptGuardPayload()
+  const guard = opencodeChatPromptGuardPayload(chatConfig)
   const directory = env.VITE_OPENCODE_DIRECTORY || OPENCODE_DEFAULT_DIRECTORY
 
   const client = getBridgeClient()
@@ -301,6 +357,32 @@ export async function saveRemoteCards(sessionId, cards, baseMetadata, signal) {
     return true
   } catch (error) {
     console.warn('[chatAdapter] saveRemoteCards 失败：', error?.message || error)
+    return false
+  }
+}
+
+// 把会话级底盘配置与当前卡片一起写入主 session metadata。
+// 新建草稿会话保存配置时会先创建远端 session，确保切换或刷新后仍可读回。
+export async function saveSessionChatConfig(sessionId, title, chatConfig, baseMetadata, cards, signal) {
+  if (backend !== 'opencode') return false
+  const client = getBridgeClient()
+  const directory = env.VITE_OPENCODE_DIRECTORY || OPENCODE_DEFAULT_DIRECTORY
+  try {
+    const normalizedConfig = normalizeChatConfig(chatConfig)
+    const oc = await ensureOpencodeSession(sessionId, title, signal, normalizedConfig)
+    const supervisorId =
+      normalizeMetadata(baseMetadata).supervisorSessionId ||
+      supervisorSessions.get(oc.id) ||
+      supervisorSessions.get(sessionId)
+    const metadata = buildMainMetadata(
+      { ...normalizeMetadata(baseMetadata), chatConfig: normalizedConfig },
+      supervisorId,
+      cards,
+    )
+    await updateSessionMetadata(client, directory, oc.id, metadata, signal)
+    return true
+  } catch (error) {
+    console.warn('[chatAdapter] saveSessionChatConfig 失败：', error?.message || error)
     return false
   }
 }
@@ -529,38 +611,38 @@ function formatClock(ts) {
   return `${hh}:${mm}`
 }
 
-export async function sendChatMessage({ sessionId, title, messages, signal }) {
+export async function sendChatMessage({ sessionId, title, messages, signal, chatConfig }) {
   if (backend === 'openai-compatible') {
-    return sendOpenAICompatibleMessage({ messages, signal })
+    return sendOpenAICompatibleMessage({ messages, signal, chatConfig })
   }
 
-  return sendOpencodeMessage({ sessionId, title, messages, signal })
+  return sendOpencodeMessage({ sessionId, title, messages, signal, chatConfig })
 }
 
-async function sendOpencodeMessage({ sessionId, title, messages, signal }) {
+async function sendOpencodeMessage({ sessionId, title, messages, signal, chatConfig }) {
   const latestUserMessage = [...messages].reverse().find((message) => message.role === 'user')
   if (!latestUserMessage?.text?.trim()) {
     throw new Error('没有可发送的用户消息。')
   }
 
-  const session = await ensureOpencodeSession(sessionId, title, signal)
+  const session = await ensureOpencodeSession(sessionId, title, signal, chatConfig)
   const promptText = session.isNew ? buildSeededPrompt(messages, latestUserMessage.text) : latestUserMessage.text
   const response = await requestOpencode(withOpencodeDirectory(`/session/${encodeURIComponent(session.id)}/message`), {
     method: 'POST',
-    body: buildOpencodePromptPayload(promptText),
+    body: buildOpencodePromptPayload(promptText, chatConfig),
     signal,
   })
   return extractOpencodeAssistantText(response)
 }
 
-async function ensureOpencodeSession(clientSessionId, title, signal) {
+async function ensureOpencodeSession(clientSessionId, title, signal, chatConfig) {
   const cacheKey = clientSessionId || 'default'
   const cached = opencodeSessions.get(cacheKey)
   if (cached) return { ...cached, isNew: false }
 
   const response = await requestOpencode(withOpencodeDirectory('/session'), {
     method: 'POST',
-    body: buildOpencodeSessionPayload(title),
+    body: buildOpencodeSessionPayload(title, chatConfig),
     signal,
   })
   const id = response?.id
@@ -571,10 +653,10 @@ async function ensureOpencodeSession(clientSessionId, title, signal) {
   return { ...session, isNew: true }
 }
 
-function buildOpencodeSessionPayload(title) {
+function buildOpencodeSessionPayload(title, chatConfig) {
   return {
     ...(title ? { title } : {}),
-    metadata: { type: 'main' },
+    metadata: { type: 'main', chatConfig: normalizeChatConfig(chatConfig) },
     ...(env.VITE_OPENCODE_AGENT ? { agent: env.VITE_OPENCODE_AGENT } : {}),
     ...opencodeChatPermissionPayload(),
     model: {
@@ -585,11 +667,11 @@ function buildOpencodeSessionPayload(title) {
   }
 }
 
-function buildOpencodePromptPayload(text) {
+function buildOpencodePromptPayload(text, chatConfig) {
   return {
     ...(env.VITE_OPENCODE_AGENT ? { agent: env.VITE_OPENCODE_AGENT } : {}),
     ...(env.VITE_OPENCODE_MODEL_VARIANT ? { variant: env.VITE_OPENCODE_MODEL_VARIANT } : {}),
-    ...opencodeChatPromptGuardPayload(),
+    ...opencodeChatPromptGuardPayload(chatConfig),
     model: {
       providerID: opencodeProviderID(),
       modelID: opencodeModelID(),
@@ -629,7 +711,7 @@ async function requestOpencode(path, options = {}) {
   }
 }
 
-async function sendOpenAICompatibleMessage({ messages, signal }) {
+async function sendOpenAICompatibleMessage({ messages, signal, chatConfig }) {
   const baseURL = env.VITE_OPENAI_BASE_URL
   if (!baseURL) {
     throw new Error('缺少 VITE_OPENAI_BASE_URL，无法调用 OpenAI-compatible 模型接口。')
@@ -641,7 +723,7 @@ async function sendOpenAICompatibleMessage({ messages, signal }) {
     messages: [
       {
         role: 'system',
-        content: '你是 ContextPilot 的聊天助手。优先使用当前会话上下文，回答要直接、清晰、可执行。',
+        content: buildChatSystemPrompt(chatConfig),
       },
       ...normalizeMessages(messages),
     ],
@@ -747,12 +829,38 @@ function basicAuthHeader(username, password) {
   return { Authorization: `Basic ${btoa(`${username}:${password}`)}` }
 }
 
-function opencodeChatPromptGuardPayload() {
-  if (env.VITE_OPENCODE_CHAT_ENABLE_TOOLS === 'true') return {}
+function opencodeChatPromptGuardPayload(chatConfig) {
+  const system = buildChatSystemPrompt(chatConfig)
+  if (env.VITE_OPENCODE_CHAT_ENABLE_TOOLS === 'true') return { system }
   return {
-    system: env.VITE_OPENCODE_SYSTEM_PROMPT || OPENCODE_CHAT_SYSTEM_PROMPT,
+    system,
     tools: Object.fromEntries(OPENCODE_CHAT_DISABLED_TOOLS.map((tool) => [tool, false])),
   }
+}
+
+function buildChatSystemPrompt(chatConfig) {
+  const basePrompt = env.VITE_OPENCODE_SYSTEM_PROMPT || OPENCODE_CHAT_SYSTEM_PROMPT
+  const config = normalizeChatConfig(chatConfig)
+  const permissionLabel = (key) => {
+    const value = config.toolPermissions[key]
+    return value === 'allow' ? '允许' : value === 'confirm' ? '需先征得用户确认' : '禁止'
+  }
+  const ruleBlock = config.rules.length ? config.rules.map((rule) => `- ${rule}`).join('\n') : '- 无额外规则'
+
+  return [
+    basePrompt,
+    '',
+    '【当前会话对话底盘配置】',
+    `对话目标：${config.goal || '未设置，围绕用户当前问题推进。'}`,
+    `当前阶段：${config.stage}`,
+    '对话规则：',
+    ruleBlock,
+    '工具权限：',
+    ...Object.entries(CHAT_CONFIG_TOOL_LABELS).map(([key, label]) => `- ${label}：${permissionLabel(key)}`),
+    `验收标准：${config.acceptanceCriteria || '给出清晰、可执行的下一步。'}`,
+    `项目记忆：${config.projectMemory || '暂无。'}`,
+    '将以上配置视为本会话的持续约束；工具是否真正可用仍以运行环境实际授予的权限为准。',
+  ].join('\n')
 }
 
 function opencodeChatPermissionPayload() {

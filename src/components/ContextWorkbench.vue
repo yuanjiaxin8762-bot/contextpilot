@@ -9,7 +9,7 @@ const props = defineProps({
   isSummarizing: { type: Boolean, default: false },
 })
 
-defineEmits(['collapse', 'expand', 'update-priority', 'toggle'])
+defineEmits(['collapse', 'expand', 'update-priority', 'toggle', 'configure'])
 
 // 类型筛选：按 category 动态生成，计数对应实际卡片；点击可过滤列表
 const activeFilter = ref('全部')
@@ -166,6 +166,11 @@ const metrics = computed(() => {
         </div>
       </div>
     </div>
+
+    <button type="button" class="primary-action config-action" @click="$emit('configure')">
+      <AppIcon name="sliders" :size="16" />
+      <span>对话底盘配置</span>
+    </button>
 
     <div
       ref="filterBarRef"

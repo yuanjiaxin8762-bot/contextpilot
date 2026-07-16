@@ -3,8 +3,9 @@ import {onMounted, reactive, ref, computed, watch} from 'vue'
 import SessionSidebar from './components/SessionSidebar.vue'
 import ContextWorkbench from './components/ContextWorkbench.vue'
 import ChatPanel from './components/ChatPanel.vue'
+import SessionConfigModal from './components/SessionConfigModal.vue'
 import { sessions, totalSessions, contextCards } from './data/workspace.js'
-import { chatModelLabel, sendChatMessage, sendChatMessageStream, chatStreams, isAbortError, loadHistory, deleteRemoteSession, runSupervisorSummary, saveRemoteCards, getSupervisorCards } from './model/chatAdapter.js'
+import { chatModelLabel, sendChatMessage, sendChatMessageStream, chatStreams, isAbortError, loadHistory, deleteRemoteSession, runSupervisorSummary, saveRemoteCards, getSupervisorCards, createDefaultChatConfig, normalizeChatConfig, saveSessionChatConfig } from './model/chatAdapter.js'
 
 const baseContextCards = ref(contextCards.map((card) => ({ ...card })))
 const defaultContextCategories = [...new Set(contextCards.map((card) => card.category))]
@@ -61,6 +62,60 @@ let activeAbortController = null
 // 两侧栏收起状态
 const sidebarCollapsed = ref(false)
 const contextCollapsed = ref(false)
+const isChatConfigOpen = ref(false)
+const isSavingChatConfig = ref(false)
+const chatConfigError = ref('')
+
+function openChatConfig() {
+  const session = activeSession.value
+  if (!session) return
+  if (!session.metadata?.chatConfig) {
+    session.metadata = {
+      ...(session.metadata || {}),
+      type: 'main',
+      chatConfig: createDefaultChatConfig(),
+    }
+  }
+  chatConfigError.value = ''
+  isChatConfigOpen.value = true
+}
+
+function closeChatConfig() {
+  if (isSavingChatConfig.value) return
+  isChatConfigOpen.value = false
+  chatConfigError.value = ''
+}
+
+async function saveChatConfig(config) {
+  const session = activeSession.value
+  if (!session || isSavingChatConfig.value) return
+
+  const chatConfig = normalizeChatConfig(config)
+  session.metadata = {
+    ...(session.metadata || {}),
+    type: 'main',
+    chatConfig,
+  }
+  isSavingChatConfig.value = true
+  chatConfigError.value = ''
+  try {
+    const saved = await saveSessionChatConfig(
+      session.id,
+      session.title,
+      chatConfig,
+      session.metadata,
+      session.contextCards || [],
+    )
+    if (!saved) {
+      throw new Error('配置未能同步到数据库，请稍后重试。')
+    }
+    isChatConfigOpen.value = false
+  } catch (error) {
+    chatConfigError.value = error instanceof Error ? error.message : '配置保存失败，请稍后重试。'
+  } finally {
+    isSavingChatConfig.value = false
+  }
+}
 
 function selectSession(id) {
   activeSessionId.value = id
@@ -95,7 +150,7 @@ function buildNewSession() {
     time: '刚刚',
     summary: '等待第一条消息',
     messages: [],
-    metadata: { type: 'main' },
+    metadata: { type: 'main', chatConfig: createDefaultChatConfig() },
     contextCards: [],
     isDraft: true,
   }
@@ -319,6 +374,7 @@ async function handleSendMessage(text) {
         messages: session.messages,
         signal: activeAbortController.signal,
         selectedCards,
+        chatConfig: session.metadata?.chatConfig,
         onDelta: (delta, fullText) => {
           pendingText = fullText
           if (!rafScheduled) {
@@ -343,6 +399,7 @@ async function handleSendMessage(text) {
         sessionId: session.id,
         title: session.title,
         messages: session.messages,
+        chatConfig: session.metadata?.chatConfig,
       })
       assistantMessage.text = reply
       runSupervisor(session, buildSupervisorTurn(userMessage, assistantMessage))
@@ -452,6 +509,7 @@ function refreshSessionContext() {}
       @expand="contextCollapsed = false"
       @toggle="toggleCardSelection"
       @update-priority="updateContextPriority"
+      @configure="openChatConfig"
     />
 
     <ChatPanel
@@ -476,6 +534,16 @@ function refreshSessionContext() {}
       :context-categories="contextCategories"
       @send="handleSendMessage"
       @add-context="addContextFromMessage"
+    />
+
+    <SessionConfigModal
+      v-if="isChatConfigOpen && activeSession"
+      :session-title="activeSession.title"
+      :config="activeSession.metadata?.chatConfig"
+      :saving="isSavingChatConfig"
+      :error="chatConfigError"
+      @close="closeChatConfig"
+      @save="saveChatConfig"
     />
   </main>
 </template>
