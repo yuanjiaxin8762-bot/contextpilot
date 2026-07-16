@@ -4,7 +4,7 @@ import SessionSidebar from './components/SessionSidebar.vue'
 import ContextWorkbench from './components/ContextWorkbench.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import { sessions, totalSessions, contextCards } from './data/workspace.js'
-import { chatModelLabel, sendChatMessage, sendChatMessageStream, chatStreams, isAbortError, loadHistory, deleteRemoteSession, runSupervisorSummary, saveRemoteCards } from './model/chatAdapter.js'
+import { chatModelLabel, sendChatMessage, sendChatMessageStream, chatStreams, isAbortError, loadHistory, deleteRemoteSession, runSupervisorSummary, saveRemoteCards, getSupervisorCards } from './model/chatAdapter.js'
 
 const baseContextCards = ref(contextCards.map((card) => ({ ...card })))
 const defaultContextCategories = [...new Set(contextCards.map((card) => card.category))]
@@ -65,6 +65,23 @@ const contextCollapsed = ref(false)
 function selectSession(id) {
   activeSessionId.value = id
   chatError.value = ''
+  refreshSupervisorCards(id)
+}
+
+// 选择对话时：拿副进程 id 缓存到 localStorage，并拉副进程最新总结刷新工作台卡片。
+async function refreshSupervisorCards(sessionId) {
+  const session = chatSessions.value.find((s) => s.id === sessionId)
+  if (!session) return
+  const supervisorId = session.metadata?.supervisorSessionId
+  if (!supervisorId) return
+  try {
+    localStorage.setItem(`contextpilot:supervisor:${sessionId}`, supervisorId)
+  } catch { /* localStorage 不可用时静默 */ }
+  const incoming = await getSupervisorCards(supervisorId)
+  if (incoming.length) {
+    session.contextCards = mergeCards(session.contextCards || [], incoming)
+    saveRemoteCards(session.id, session.contextCards, session.metadata)
+  }
 }
 
 function buildNewSession() {
@@ -171,12 +188,17 @@ async function runSupervisor(session) {
   if (!session || summarizingIds.value.has(session.id)) return
   summarizingIds.value = new Set(summarizingIds.value).add(session.id)
   try {
-    const incoming = await runSupervisorSummary({
+    const { cards: incoming, supervisorId } = await runSupervisorSummary({
       mainSessionId: session.id,
       messages: session.messages,
       cards: session.contextCards,
+      mainMetadata: session.metadata,
     })
-    if (incoming.length) {
+    // 同步前端 metadata 的 supervisorSessionId，避免后续 saveRemoteCards 用旧 metadata 覆盖掉绑定。
+    if (supervisorId) {
+      session.metadata = { ...(session.metadata || {}), supervisorSessionId: supervisorId }
+    }
+    if (incoming?.length) {
       session.contextCards = mergeCards(session.contextCards || [], incoming)
       saveRemoteCards(session.id, session.contextCards, session.metadata)
     }

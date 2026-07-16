@@ -167,8 +167,16 @@ export async function loadHistory() {
 
     const result = []
     for (const oc of list) {
+      const metadata = oc.metadata && typeof oc.metadata === 'object' ? oc.metadata : {}
+      // 监督 session（副进程）不进侧栏，跳过。
+      if (metadata.type === 'supervisor') continue
+
       // 预填 session 缓存：历史会话续聊时 ensureOpencodeSession 直接命中，复用 opencode session。
       opencodeSessions.set(oc.id, { id: oc.id })
+      // 重建主→监督映射：刷新后 supervisorSessions 不丢，监督 session 长期复用。
+      if (metadata.supervisorSessionId) {
+        supervisorSessions.set(oc.id, metadata.supervisorSessionId)
+      }
 
       let messages = []
       try {
@@ -179,7 +187,6 @@ export async function loadHistory() {
       }
 
       const firstUser = messages.find((m) => m.role === 'user')
-      const metadata = oc.metadata && typeof oc.metadata === 'object' ? oc.metadata : {}
       const contextCards = Array.isArray(metadata.contextCards) ? metadata.contextCards : []
       result.push({
         id: oc.id,
@@ -207,7 +214,9 @@ export async function deleteRemoteSession(sessionId, signal) {
   const directory = env.VITE_OPENCODE_DIRECTORY || OPENCODE_DEFAULT_DIRECTORY
   const client = getBridgeClient()
   try {
-    await client.removeSession({ sessionID: sessionId, directory }, signal)
+    // sessionId 可能是前端 UI id，先映射到 opencode session id，避免 DELETE 404。
+    const oc = await ensureOpencodeSession(sessionId, undefined, signal)
+    await client.removeSession({ sessionID: oc.id, directory }, signal)
     opencodeSessions.delete(sessionId)
     return true
   } catch (error) {
@@ -222,9 +231,11 @@ export async function saveRemoteCards(sessionId, cards, baseMetadata, signal) {
   if (backend !== 'opencode') return false
   const client = getBridgeClient()
   const directory = env.VITE_OPENCODE_DIRECTORY || OPENCODE_DEFAULT_DIRECTORY
-  const metadata = { ...(baseMetadata || {}), contextCards: cards || [] }
   try {
-    await client.updateSession({ sessionID: sessionId, directory, body: { metadata } }, signal)
+    // sessionId 可能是前端 UI id（新建会话），先映射到 opencode session id，避免 PATCH 404。
+    const oc = await ensureOpencodeSession(sessionId, undefined, signal)
+    const metadata = { ...(baseMetadata || {}), contextCards: cards || [] }
+    await client.updateSession({ sessionID: oc.id, directory, body: { metadata } }, signal)
     return true
   } catch (error) {
     console.warn('[chatAdapter] saveRemoteCards 失败：', error?.message || error)
@@ -232,18 +243,19 @@ export async function saveRemoteCards(sessionId, cards, baseMetadata, signal) {
   }
 }
 
-// 监督总结：用独立的监督 opencode session 把主对话总结成卡片。失败返回 []（不抛）。
-export async function runSupervisorSummary({ mainSessionId, messages, cards, signal }) {
-  if (backend !== 'opencode') return []
+// 监督总结：用独立的监督 opencode session 把主对话总结成卡片。
+// 返回 { cards, supervisorId }；失败时 cards 为 []（不抛）。
+export async function runSupervisorSummary({ mainSessionId, messages, cards, mainMetadata, signal }) {
+  if (backend !== 'opencode') return { cards: [], supervisorId: null }
   const client = getBridgeClient()
   const directory = env.VITE_OPENCODE_DIRECTORY || OPENCODE_DEFAULT_DIRECTORY
 
   let supervisorId
   try {
-    supervisorId = await ensureSupervisorSession(mainSessionId, signal)
+    supervisorId = await ensureSupervisorSession(mainSessionId, mainMetadata, signal)
   } catch (error) {
     console.warn('[chatAdapter] ensureSupervisorSession 失败：', error?.message || error)
-    return []
+    return { cards: [], supervisorId: null }
   }
 
   const prompt = buildSupervisorPrompt(messages, cards)
@@ -266,27 +278,68 @@ export async function runSupervisorSummary({ mainSessionId, messages, cards, sig
       timeout.signal,
     )
     const text = extractOpencodeAssistantText(result, { allowIncomplete: true })
-    return parseCardsFromText(text)
+    return { cards: parseCardsFromText(text), supervisorId }
   } catch (error) {
     console.warn('[chatAdapter] runSupervisorSummary 失败：', error?.message || error)
-    return []
+    return { cards: [], supervisorId }
   } finally {
     clearTimeout(timer)
   }
 }
 
 // 为主对话创建/复用监督 session（缓存 mainId → supervisorId）。
-async function ensureSupervisorSession(mainSessionId, signal) {
+// 创建时给监督 session 打标 type=supervisor（便于 loadHistory 过滤），并把绑定关系
+// 持久化进主 session metadata（刷新后可重建映射，监督 session 长期复用）。
+async function ensureSupervisorSession(mainSessionId, mainMetadata, signal) {
   const cached = supervisorSessions.get(mainSessionId)
   if (cached) return cached
   const client = getBridgeClient()
   const directory = env.VITE_OPENCODE_DIRECTORY || OPENCODE_DEFAULT_DIRECTORY
-  const session = await client.createSession(
-    { directory, model: { id: opencodeModelID(), providerID: opencodeProviderID() } },
+  const sup = await client.createSession(
+    {
+      directory,
+      model: { id: opencodeModelID(), providerID: opencodeProviderID() },
+      metadata: { type: 'supervisor', mainSessionId },
+    },
     signal,
   )
-  supervisorSessions.set(mainSessionId, session.id)
-  return session.id
+  supervisorSessions.set(mainSessionId, sup.id)
+  try {
+    const main = await ensureOpencodeSession(mainSessionId, undefined, signal)
+    await client.updateSession(
+      {
+        sessionID: main.id,
+        directory,
+        body: { metadata: { ...(mainMetadata || {}), supervisorSessionId: sup.id } },
+      },
+      signal,
+    )
+  } catch (error) {
+    console.warn('[chatAdapter] 写主 session supervisorSessionId 失败：', error?.message || error)
+  }
+  return sup.id
+}
+
+// 拉取监督 session 的最新总结，解析成卡片（选择对话时刷新工作台用）。
+export async function getSupervisorCards(supervisorId, signal) {
+  if (backend !== 'opencode' || !supervisorId) return []
+  const client = getBridgeClient()
+  const directory = env.VITE_OPENCODE_DIRECTORY || OPENCODE_DEFAULT_DIRECTORY
+  try {
+    const withParts = await client.messages({ sessionID: supervisorId, directory }, signal)
+    if (!Array.isArray(withParts)) return []
+    // 取最后一条 assistant 总结的 text（最新卡片集）。
+    const last = [...withParts].reverse().find((m) => m?.info?.role === 'assistant')
+    if (!last) return []
+    const text = (last.parts || [])
+      .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+      .map((p) => p.text)
+      .join('\n')
+    return parseCardsFromText(text)
+  } catch (error) {
+    console.warn('[chatAdapter] getSupervisorCards 失败：', error?.message || error)
+    return []
+  }
 }
 
 // 构造发给监督 session 的 prompt：主对话历史 + 现有卡片，要求输出卡片 JSON。
