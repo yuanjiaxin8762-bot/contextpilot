@@ -4,6 +4,7 @@ import SessionSidebar from './components/SessionSidebar.vue'
 import ContextWorkbench from './components/ContextWorkbench.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import SessionConfigModal from './components/SessionConfigModal.vue'
+import WorkflowModal from './components/WorkflowModal.vue'
 import { sessions, totalSessions, contextCards } from './data/workspace.js'
 import { chatModelLabel, sendChatMessage, sendChatMessageStream, chatStreams, isAbortError, loadHistory, deleteRemoteSession, runSupervisorSummary, saveRemoteCards, getSupervisorCards, createDefaultChatConfig, normalizeChatConfig, saveSessionChatConfig } from './model/chatAdapter.js'
 
@@ -63,6 +64,7 @@ let activeAbortController = null
 const sidebarCollapsed = ref(false)
 const contextCollapsed = ref(false)
 const isChatConfigOpen = ref(false)
+const isWorkflowOpen = ref(false)
 const isSavingChatConfig = ref(false)
 const chatConfigError = ref('')
 
@@ -77,7 +79,14 @@ function openChatConfig() {
     }
   }
   chatConfigError.value = ''
+  isWorkflowOpen.value = false
   isChatConfigOpen.value = true
+}
+
+function openWorkflow() {
+  if (!activeSession.value) return
+  isChatConfigOpen.value = false
+  isWorkflowOpen.value = true
 }
 
 function closeChatConfig() {
@@ -520,6 +529,7 @@ function refreshSessionContext() {}
       @toggle="toggleCardSelection"
       @update-priority="updateContextPriority"
       @configure="openChatConfig"
+      @workflow="openWorkflow"
     />
 
     <ChatPanel
@@ -554,6 +564,15 @@ function refreshSessionContext() {}
       :error="chatConfigError"
       @close="closeChatConfig"
       @save="saveChatConfig"
+    />
+
+    <WorkflowModal
+      v-if="isWorkflowOpen && activeSession"
+      :session-title="activeSession.title"
+      :messages="activeSession.messages"
+      :cards="activeContextCards"
+      :is-summarizing="isSummarizing"
+      @close="isWorkflowOpen = false"
     />
   </main>
 </template>

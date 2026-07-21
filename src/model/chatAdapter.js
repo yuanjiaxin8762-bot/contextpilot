@@ -653,12 +653,28 @@ function toUIMessage(withParts) {
     id: info.id,
     role: info.role === 'user' ? 'user' : 'assistant',
     time: formatClock(info.time?.created),
+    createdAt: info.time?.created,
     text,
     partIDs: normalizePartIDs(
       parts
         .filter((p) => p && p.type === 'text' && !p.synthetic && !p.ignored && typeof p.id === 'string')
         .map((p) => p.id),
     ),
+    workflowParts: parts.flatMap((part) => {
+      if (!part || !['text', 'reasoning', 'tool', 'compaction'].includes(part.type)) return []
+      if (part.type === 'text' && (part.synthetic || part.ignored)) return []
+      return [{
+        id: typeof part.id === 'string' ? part.id : '',
+        type: part.type,
+        tool: typeof part.tool === 'string' ? part.tool : '',
+        callID: typeof part.callID === 'string' ? part.callID : '',
+        status: typeof part.state?.status === 'string' ? part.state.status : 'completed',
+        startedAt: part.state?.time?.start,
+        endedAt: part.state?.time?.end,
+        text: typeof part.text === 'string' ? part.text.slice(0, 240) : '',
+        error: typeof part.state?.error === 'string' ? part.state.error.slice(0, 240) : '',
+      }]
+    }),
     ...(reasoning ? { reasoning } : {}),
   }
 }
